@@ -4,12 +4,14 @@
 import asyncio
 import secrets
 import logging
+import os
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     MessageCreated,
-    CommandStart,
+    BotStarted,
     MessageButton,
     ButtonsPayload,
     RequestGeoLocationButton,
@@ -19,6 +21,7 @@ from db import (
     init_db,
     WifiPoint,
     UserRole,
+    UserProfile,
     InviteToken,
     get_nearest_points,
     parse_wifi_line,
@@ -31,20 +34,39 @@ from states import state_mgr
 # НАСТРОЙКИ
 
 
-# ТОКЕЕЕЕЕЕЕЕЕЕЕН
-BOT_TOKEN = " "
+def load_env_file(path=".env"):
+    """Загружает простые KEY=VALUE настройки из .env без доп. зависимостей."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
 
-# ВАШЕ ID администратора
+
+load_env_file()
+BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не задан MAX_BOT_TOKEN. Создайте файл .env по образцу .env.example "
+        "и укажите токен бота MAX."
+    )
+
+# Можно указать несколько ID через запятую: ADMIN_IDS=123,456
 ADMIN_IDS = [
-    " "
+    value.strip()
+    for value in os.getenv("ADMIN_IDS", "").split(",")
+    if value.strip()
 ]
-
-
-
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
 
 
 # РАБОТА С РОЛЯМИ
@@ -100,43 +122,39 @@ def make_keyboard(buttons):
 
 
 def get_menu_keyboard(user_id):
-
     roles = get_user_roles(user_id)
 
-    
-    # Администратор
-    
+    geo_button = [
+        RequestGeoLocationButton(
+            text="📍 Отправить геопозицию",
+            quick=True,
+        )
+    ]
 
     if "admin" in roles:
-
-        return make_keyboard([
-            ["Добавить точку"],
-            ["Редактировать точку"],
-            ["Удалить точку"],
-            ["Список точек"],
-            ["Создать ссылку на оператора"],
-            ["Создать ссылку на администратора"],
-            ["Снять оператора"],
-            ["Снять администратора"],
-            ["Список ролей"],
-        ])
-
-    
-    # Оператор
-    
+        return ButtonsPayload(buttons=[
+            geo_button,
+            [MessageButton(text="Добавить точку")],
+            [MessageButton(text="Редактировать точку")],
+            [MessageButton(text="Удалить точку")],
+            [MessageButton(text="Список точек")],
+            [MessageButton(text="Создать ссылку на оператора")],
+            [MessageButton(text="Создать ссылку на администратора")],
+            [MessageButton(text="Снять оператора")],
+            [MessageButton(text="Снять администратора")],
+            [MessageButton(text="Список ролей")],
+        ]).pack()
 
     if "operator" in roles:
+        return ButtonsPayload(buttons=[
+            geo_button,
+            [MessageButton(text="Добавить точку")],
+            [MessageButton(text="Редактировать точку")],
+            [MessageButton(text="Удалить точку")],
+            [MessageButton(text="Список точек")],
+        ]).pack()
 
-        return make_keyboard([
-            ["Добавить точку"],
-            ["Редактировать точку"],
-            ["Удалить точку"],
-            ["Список точек"],
-        ])
-
-    # Обычный пользователь
     return None
-
 
 def get_cancel_keyboard():
 
@@ -150,7 +168,17 @@ def get_confirm_keyboard():
     return make_keyboard([
         ["Да", "Нет"]
     ])
-
+def get_geo_keyboard():
+    return ButtonsPayload(
+        buttons=[
+            [
+                RequestGeoLocationButton(
+                    text="📍 Отправить геопозицию",
+                    quick=True,
+                )
+            ]
+        ]
+    ).pack()
 
 # ВСПОМОГАТЕЛЬНОЕ
 
@@ -161,8 +189,46 @@ def get_user_id(message):
     """
 
     return str(message.sender.user_id)
+def save_user_profile(message):
+    """Сохраняет или обновляет профиль пользователя MAX."""
+    sender = message.sender
 
+    if sender is None:
+        return
 
+    user_id = str(sender.user_id)
+
+    profile, created = UserProfile.get_or_create(
+        user_id=user_id,
+        defaults={
+            "first_name": sender.first_name,
+            "last_name": sender.last_name,
+            "username": sender.username,
+        }
+    )
+
+    if not created:
+        profile.first_name = sender.first_name
+        profile.last_name = sender.last_name
+        profile.username = sender.username
+        profile.updated_at = datetime.now()
+        profile.save()
+def get_user_display(user_id):
+    """Формирует понятное имя пользователя для списка ролей."""
+    profile = UserProfile.get_or_none(
+        UserProfile.user_id == str(user_id)
+    )
+
+    if not profile:
+        return f"Неизвестный пользователь | ID: {user_id}"
+
+    full_name = " ".join(
+        part for part in [profile.first_name, profile.last_name] if part
+    )
+
+    username = f"@{profile.username}" if profile.username else "без username"
+
+    return f"{full_name or 'Без имени'} | {username} | ID: {user_id}"
 def get_text(message):
     """
     Получаем текст сообщения.
@@ -175,33 +241,92 @@ def get_text(message):
 
 
 
-# /START
+# ЗАПУСК БОТА И DEEP-LINK ПРИГЛАШЕНИЯ
 
 
-@dp.message_created(CommandStart())
-async def start_command(event: MessageCreated):
+def ensure_user_exists(user_id):
+    """Создаёт обычную роль, только если у пользователя ещё нет ролей."""
+    user_id = str(user_id)
+    if not UserRole.select().where(UserRole.user_id == user_id).exists():
+        UserRole.create(user_id=user_id, role="user")
 
+
+async def send_start_response(user_id, chat_id, message=None, payload=None):
+    """Общий сценарий старта для события MAX bot_started и /start."""
+    user_id = str(user_id)
+    ensure_user_exists(user_id)
+
+    if payload:
+        token = (
+            InviteToken.select()
+            .where((InviteToken.token == payload) & (InviteToken.is_used == False))
+            .first()
+        )
+        if not token or datetime.now() - token.created_at >= timedelta(minutes=15):
+            text = "Ссылка недействительна или истекла."
+            keyboard = get_menu_keyboard(user_id) if is_operator(user_id) else get_geo_keyboard()
+            await send_reply(message, chat_id, text, keyboard)
+            return
+
+        # Не удаляем остальные роли: по требованиям MAX роли суммируются.
+        UserRole.get_or_create(user_id=user_id, role=token.role_to_assign)
+        UserRole.get_or_create(user_id=user_id, role="user")
+        token.is_used = True
+        token.save()
+
+        logging.info("Пользователь %s получил роль %s по приглашению", user_id, token.role_to_assign)
+        keyboard = get_menu_keyboard(user_id)
+        await send_reply(
+            message, chat_id,
+            f"Вам назначена роль {token.role_to_assign}.",
+            keyboard,
+        )
+        return
+
+    if is_operator(user_id):
+        await send_reply(
+            message, chat_id,
+            "Добро пожаловать! Используйте меню ниже.",
+            get_menu_keyboard(user_id),
+        )
+    else:
+        await send_reply(
+            message, chat_id,
+            "Отправьте свою геопозицию, и я пришлю 3 ближайшие точки "
+            "бесплатного Wi-Fi в Костроме.",
+            get_geo_keyboard(),
+        )
+
+
+async def send_reply(message, chat_id, text, keyboard=None):
+    """Отправляет ответ и для события BotStarted, и для обычного сообщения."""
+    attachments = [keyboard] if keyboard else None
+    if message is not None:
+        await message.answer(text, attachments=attachments)
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, attachments=attachments)
+
+
+@dp.bot_started()
+async def bot_started(event: BotStarted):
+    # MAX отправляет это событие при нажатии «Начать» и при переходе по deep-link.
+    user_id = str(event.user.user_id)
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, str):
+        payload = None
+    await send_start_response(user_id, event.chat_id, payload=payload)
+
+
+# ГЕОЛОКАЦИЯ
+
+
+@dp.message_created()
+async def handle_message(event: MessageCreated):
     message = event.message
+    save_user_profile(message)
+
 
     user_id = get_user_id(message)
-
-    # Получаем текст команды.
-    # Например:
-    # /start
-    # /start ABC123
-    text = get_text(message)
-
-    parts = text.split(maxsplit=1)
-
-    args = ""
-
-    if len(parts) > 1:
-        args = parts[1].strip()
-
-    
-    # Если пользователя ещё нет — создаём обычного user
-    
-
     exists = (
         UserRole
         .select()
@@ -210,144 +335,17 @@ async def start_command(event: MessageCreated):
     )
 
     if not exists:
-
         UserRole.create(
             user_id=user_id,
-            role="user"
+            role="user",
         )
-
-    
-    # DEEP-LINK
-    
-
-    if args:
-
-        token = (
-            InviteToken
-            .select()
-            .where(
-                (InviteToken.token == args)
-                & (InviteToken.is_used == False)
-            )
-            .first()
-        )
-
-        
-        # Проверяем токен
-        
-
-        if token:
-
-            # Ссылка действует 15 минут
-            if (
-                datetime.now() - token.created_at
-                < timedelta(minutes=15)
-            ):
-
-                # Удаляем старые operator/admin роли
-                (
-                    UserRole
-                    .delete()
-                    .where(
-                        (UserRole.user_id == user_id)
-                        & (UserRole.role != "user")
-                    )
-                    .execute()
-                )
-
-                # Выдаём новую роль
-                UserRole.get_or_create(
-                    user_id=user_id,
-                    role=token.role_to_assign
-                )
-
-                # user сохраняем
-                UserRole.get_or_create(
-                    user_id=user_id,
-                    role="user"
-                )
-
-                # Ссылка использована
-                token.is_used = True
-                token.save()
-
-                logging.info(
-                    "Пользователь %s получил роль %s",
-                    user_id,
-                    token.role_to_assign
-                )
-
-                keyboard = get_menu_keyboard(user_id)
-
-                await message.answer(
-                    f"Вам назначена роль "
-                    f"{token.role_to_assign}.",
-                    attachments=[keyboard] if keyboard else None
-                )
-
-                return
-
-        await message.answer(
-            "Ссылка недействительна или истекла."
-        )
-
-        return
-
-    
-    # ОБЫЧНЫЙ /START
-    
-    roles = get_user_roles(user_id)
-
-    # Только обычный пользователь
-    if roles == ["user"]:
-
-        keyboard = ButtonsPayload(
-            buttons=[
-                [
-                    RequestGeoLocationButton(
-                        text="📍 Отправить геопозицию",
-                        quick=True
-                    )
-                ]
-            ]
-        ).pack()
-
-        await message.answer(
-            "Отправьте свою геолокацию, "
-            "и я пришлю 3 ближайшие точки "
-            "бесплатного Wi-Fi в Костроме.",
-            attachments=[keyboard]
-        )
-
-        return
-
-    # Оператор / администратор
-    keyboard = get_menu_keyboard(user_id)
-
-    await message.answer(
-        "Добро пожаловать! "
-        "Используйте меню ниже.",
-        attachments=[keyboard] if keyboard else None
-    )
-
-
-
-# ГЕОЛОКАЦИЯ
-
-
-@dp.message_created()
-async def handle_message(event: MessageCreated):
-
-    message = event.message
-
-    user_id = get_user_id(message)
 
     print("USER ID FROM MAX:", user_id)
     print("ROLES:", get_user_roles(user_id))
 
-    
+
     # Проверяем, есть ли геолокация
-    
+
 
     body = message.body
 
@@ -374,19 +372,19 @@ async def handle_message(event: MessageCreated):
 
             return
 
-    
+
     # Если это текст — обрабатываем текст
-    
+
 
     text = get_text(message).strip()
 
-    if text:
-
-        await handle_text(
-            message,
-            user_id,
-            text
-        )
+    # Любое сообщение без координат попадает в текстовый сценарий,
+    # в том числе стикеры/вложения без текста.
+    await handle_text(
+        message,
+        user_id,
+        text
+    )
 
 
 
@@ -480,9 +478,9 @@ async def handle_text(
         or admin
     )
 
-    
+
     # ОТМЕНА
-    
+
 
     if text == "Отмена":
 
@@ -497,9 +495,9 @@ async def handle_text(
 
         return
 
-    
+
     # ДОБАВЛЕНИЕ ТОЧКИ
-    
+
 
     if (
         state == "adding_point"
@@ -544,7 +542,7 @@ async def handle_text(
 
 
     # ПОЛУЧЕНИЕ ID ДЛЯ РЕДАКТИРОВАНИЯ
-    
+
 
     if (
         state == "editing_get_id"
@@ -601,9 +599,9 @@ async def handle_text(
 
         return
 
-    
+
     # СОХРАНЕНИЕ ИЗМЕНЕНИЙ
-    
+
 
     if (
         state == "editing_save_data"
@@ -647,9 +645,9 @@ async def handle_text(
 
         return
 
-    
+
     # ПОЛУЧЕНИЕ ID ДЛЯ УДАЛЕНИЯ
-    
+
 
     if (
         state == "deleting_get_id"
@@ -695,9 +693,9 @@ async def handle_text(
 
         return
 
-    
+
     # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ
-    
+
 
     if (
         state == "deleting_confirm"
@@ -753,7 +751,7 @@ async def handle_text(
 
 
     # МЕНЮ ОПЕРАТОРА
-    
+
 
     if text == "Добавить точку":
 
@@ -781,9 +779,9 @@ async def handle_text(
 
         return
 
-    
+
     # Редактирование
-    
+
 
     if text == "Редактировать точку":
 
@@ -808,9 +806,9 @@ async def handle_text(
 
         return
 
-    
+
     # Удаление
-    
+
 
     if text == "Удалить точку":
 
@@ -835,9 +833,9 @@ async def handle_text(
 
         return
 
-    
+
     # Список точек
-    
+
 
     if text == "Список точек":
 
@@ -876,9 +874,9 @@ async def handle_text(
 
         return
 
-    
+
     # СОЗДАНИЕ ССЫЛКИ НА ОПЕРАТОРА / АДМИНА
-    
+
 
     if text in [
         "Создать ссылку на оператора",
@@ -929,202 +927,184 @@ async def handle_text(
 
         return
 
-    
-    # СНЯТИЕ ОПЕРАТОРА
-    
+
+       # СНЯТИЕ РОЛЕЙ ЧЕРЕЗ СПИСОК И ПОДТВЕРЖДЕНИЕ
 
     if text == "Снять оператора":
-
         if not admin:
-
-            await message.answer(
-                "Недостаточно прав."
-            )
-
+            await message.answer("Недостаточно прав.")
             return
 
-        state_mgr.set_state(
-            user_id,
-            "removing_operator"
+        targets = list(
+            UserRole.select().where(UserRole.role == "operator")
         )
+
+        if not targets:
+            await message.answer("Операторов пока нет.")
+            return
+
+        state_mgr.set_state(user_id, "selecting_operator_to_remove")
+
+        keyboard = make_keyboard([
+            [f"Выбрать оператора: {get_user_display(item.user_id)}"]
+            for item in targets
+        ] + [["Отмена"]])
 
         await message.answer(
-            "Введите ID пользователя, "
-            "у которого нужно снять "
-            "роль оператора.",
-            attachments=[get_cancel_keyboard()]
+            "Выберите оператора. Проверьте имя и ID:",
+            attachments=[keyboard]
         )
-
         return
-
-    
-    # СНЯТИЕ АДМИНИСТРАТОРА
-    
 
     if text == "Снять администратора":
-
         if not admin:
+            await message.answer("Недостаточно прав.")
+            return
 
+        targets = list(
+            UserRole.select().where(UserRole.role == "admin")
+        )
+
+        if not targets:
+            await message.answer("Администраторов не найдено.")
+            return
+
+        state_mgr.set_state(user_id, "selecting_admin_to_remove")
+
+        keyboard = make_keyboard([
+            [f"Выбрать администратора: {get_user_display(item.user_id)}"]
+            for item in targets
+        ] + [["Отмена"]])
+
+        await message.answer(
+            "Выберите администратора. Проверьте имя и ID:",
+            attachments=[keyboard]
+        )
+        return
+
+    if state == "selecting_operator_to_remove" and admin:
+        prefix = "Выбрать оператора: "
+
+        if not text.startswith(prefix):
             await message.answer(
-                "Недостаточно прав."
+                "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
+            return
 
+        selected = text[len(prefix):].strip()
+        target_id = selected.split("ID:")[-1].strip()
+
+        exists = UserRole.select().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == "operator")
+        ).exists()
+
+        if not exists:
+            state_mgr.clear_state(user_id)
+            await message.answer("У этого пользователя уже нет роли оператора.")
             return
 
         state_mgr.set_state(
-            user_id,
-            "removing_admin"
+            user_id, "confirm_remove_operator", {"target_id": target_id}
         )
 
         await message.answer(
-            "Введите ID пользователя, "
-            "у которого нужно снять "
-            "роль администратора.",
-            attachments=[get_cancel_keyboard()]
+            f"Вы действительно хотите снять роль оператора?\n\n"
+            f"{get_user_display(target_id)}",
+            attachments=[make_keyboard([
+                ["Подтвердить снятие"],
+                ["Отмена"]
+            ])]
         )
-
         return
 
-   
-    # ОБРАБОТКА СНЯТИЯ ОПЕРАТОРА
-    
+    if state == "selecting_admin_to_remove" and admin:
+        prefix = "Выбрать администратора: "
 
-    if (
-        state == "removing_operator"
-        and admin
-    ):
-
-        target_id = text
-
-        exists = (
-            UserRole
-            .select()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "operator")
+        if not text.startswith(prefix):
+            await message.answer(
+                "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
-            .exists()
-        )
+            return
+
+        selected = text[len(prefix):].strip()
+        target_id = selected.split("ID:")[-1].strip()
+
+        exists = UserRole.select().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == "admin")
+        ).exists()
 
         if not exists:
-
+            state_mgr.clear_state(user_id)
             await message.answer(
-                f"У пользователя {target_id} "
-                "нет роли оператора."
+                "У этого пользователя уже нет роли администратора."
             )
+            return
 
-        else:
+        state_mgr.set_state(
+            user_id, "confirm_remove_admin", {"target_id": target_id}
+        )
 
-            (
-                UserRole
-                .delete()
-                .where(
-                    (UserRole.user_id == target_id)
-                    & (UserRole.role == "operator")
+        await message.answer(
+            f"Вы действительно хотите снять роль администратора?\n\n"
+            f"{get_user_display(target_id)}",
+            attachments=[make_keyboard([
+                ["Подтвердить снятие"],
+                ["Отмена"]
+            ])]
+        )
+        return
+
+    if state in ("confirm_remove_operator", "confirm_remove_admin") and admin:
+        if text != "Подтвердить снятие":
+            await message.answer(
+                "Роль не изменена. Нажмите «Подтвердить снятие» "
+                "или «Отмена»."
+            )
+            return
+
+        data = state_mgr.get_state(user_id)[1]
+        target_id = str(data.get("target_id", ""))
+
+        role_to_remove = (
+            "operator" if state == "confirm_remove_operator" else "admin"
+        )
+
+        if role_to_remove == "admin":
+            admin_count = UserRole.select().where(
+                UserRole.role == "admin"
+            ).count()
+
+            if admin_count <= 1:
+                state_mgr.clear_state(user_id)
+                await message.answer(
+                    "Нельзя снять роль с последнего администратора."
                 )
-                .execute()
-            )
+                return
 
+        deleted = UserRole.delete().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == role_to_remove)
+        ).execute()
+
+        state_mgr.clear_state(user_id)
+
+        if deleted:
             logging.info(
-                "Администратор %s снял operator с %s",
-                user_id,
-                target_id
+                "Администратор %s снял роль %s с пользователя %s",
+                user_id, role_to_remove, target_id
             )
-
-            keyboard = get_menu_keyboard(user_id)
-
             await message.answer(
-                f"У пользователя {target_id} "
-                "снята роль оператора.",
-                attachments=[keyboard] if keyboard else None
+                f"Роль {'оператора' if role_to_remove == 'operator' else 'администратора'} "
+                f"снята.\n\n{get_user_display(target_id)}"
             )
-
-        state_mgr.clear_state(user_id)
-
+        else:
+            await message.answer("Роль уже отсутствует.")
         return
 
-    
-    # ОБРАБОТКА СНЯТИЯ АДМИНИСТРАТОРА
-    
-
-    if (
-        state == "removing_admin"
-        and admin
-    ):
-
-        target_id = text
-
-        exists = (
-            UserRole
-            .select()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "admin")
-            )
-            .exists()
-        )
-
-        if not exists:
-
-            await message.answer(
-                f"У пользователя {target_id} "
-                "нет роли администратора."
-            )
-
-            state_mgr.clear_state(user_id)
-
-            return
-
-        # Нельзя удалить последнего администратора
-        admin_count = (
-            UserRole
-            .select()
-            .where(UserRole.role == "admin")
-            .count()
-        )
-
-        if admin_count == 1:
-
-            await message.answer(
-                "Нельзя снять роль "
-                "с последнего администратора."
-            )
-
-            state_mgr.clear_state(user_id)
-
-            return
-
-        (
-            UserRole
-            .delete()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "admin")
-            )
-            .execute()
-        )
-
-        logging.info(
-            "Администратор %s снял admin с %s",
-            user_id,
-            target_id
-        )
-
-        keyboard = get_menu_keyboard(user_id)
-
-        await message.answer(
-            f"У пользователя {target_id} "
-            "снята роль администратора.",
-            attachments=[keyboard] if keyboard else None
-        )
-
-        state_mgr.clear_state(user_id)
-
-        return
-
-    
     # СПИСОК РОЛЕЙ
-    
+
 
     if text == "Список ролей":
 
@@ -1155,14 +1135,28 @@ async def handle_text(
 
         return
 
-    
-    # НЕРАСПОЗНАННЫЙ ТЕКСТ
-    
 
+    # НЕРАСПОЗНАННОЕ СООБЩЕНИЕ
+    # Если оператор/администратор находится в диалоге ввода, не сбрасываем состояние.
+    if state and operator:
+        await message.answer(
+            "Не удалось обработать сообщение в текущем шаге. "
+            "Отправьте ожидаемые текстовые данные или нажмите «Отмена»."
+        )
+        return
+
+    if not operator:
+        await message.answer(
+            "Чтобы найти 3 ближайшие точки бесплатного Wi-Fi в Костроме, "
+            "отправьте свою геопозицию.",
+            attachments=[get_geo_keyboard()],
+        )
+        return
+
+    keyboard = get_menu_keyboard(user_id)
     await message.answer(
-        "Не удалось распознать команду.\n"
-        "Если вы хотите найти Wi-Fi, "
-        "отправьте свою геолокацию."
+        "Не удалось распознать команду. Выберите действие в меню.",
+        attachments=[keyboard] if keyboard else None,
     )
 
 
@@ -1177,7 +1171,9 @@ async def main():
 
     print("Бот МАКС запускается...")
 
-    # Запускаем polling
+    # Если ранее был настроен webhook, события не будут приходить в polling.
+    # Для этого проекта используется long polling.
+    await bot.delete_webhook()
     await dp.start_polling(bot)
 
 
