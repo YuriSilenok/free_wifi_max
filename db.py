@@ -43,7 +43,12 @@ class UserRole(BaseModel):
 
     class Meta:
         primary_key = CompositeKey("user_id", "role")
-
+class UserProfile(BaseModel):
+    user_id = CharField(primary_key=True)
+    first_name = CharField(null=True)
+    last_name = CharField(null=True)
+    username = CharField(null=True)
+    updated_at = DateTimeField(default=datetime.now)
 
 
 # Точки Wi-Fi
@@ -79,6 +84,7 @@ def init_db(admin_ids):
 
     db.create_tables([
         UserRole,
+        UserProfile,
         WifiPoint,
         InviteToken
     ])
@@ -116,6 +122,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
         * math.cos(phi2)
         * math.sin(dlambda / 2) ** 2
     )
+
+    a = max(0.0, min(1.0, a))
 
     c = 2 * math.atan2(
         math.sqrt(a),
@@ -196,9 +204,19 @@ def parse_wifi_line(line):
     try:
         latitude = float(lat)
         longitude = float(lon)
-    except ValueError:
+    except ValueError as error:
         raise ValueError(
             "Широта и долгота должны быть числами"
+        ) from error
+
+    if not (-90 <= latitude <= 90):
+        raise ValueError(
+            "Широта должна быть от -90 до 90"
+        )
+
+    if not (-180 <= longitude <= 180):
+        raise ValueError(
+            "Долгота должна быть от -180 до 180"
         )
 
     return {

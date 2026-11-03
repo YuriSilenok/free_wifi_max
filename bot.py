@@ -21,6 +21,7 @@ from db import (
     init_db,
     WifiPoint,
     UserRole,
+    UserProfile,
     InviteToken,
     get_nearest_points,
     parse_wifi_line,
@@ -188,8 +189,46 @@ def get_user_id(message):
     """
 
     return str(message.sender.user_id)
+def save_user_profile(message):
+    """Сохраняет или обновляет профиль пользователя MAX."""
+    sender = message.sender
 
+    if sender is None:
+        return
 
+    user_id = str(sender.user_id)
+
+    profile, created = UserProfile.get_or_create(
+        user_id=user_id,
+        defaults={
+            "first_name": sender.first_name,
+            "last_name": sender.last_name,
+            "username": sender.username,
+        }
+    )
+
+    if not created:
+        profile.first_name = sender.first_name
+        profile.last_name = sender.last_name
+        profile.username = sender.username
+        profile.updated_at = datetime.now()
+        profile.save()
+def get_user_display(user_id):
+    """Формирует понятное имя пользователя для списка ролей."""
+    profile = UserProfile.get_or_none(
+        UserProfile.user_id == str(user_id)
+    )
+
+    if not profile:
+        return f"Неизвестный пользователь | ID: {user_id}"
+
+    full_name = " ".join(
+        part for part in [profile.first_name, profile.last_name] if part
+    )
+
+    username = f"@{profile.username}" if profile.username else "без username"
+
+    return f"{full_name or 'Без имени'} | {username} | ID: {user_id}"
 def get_text(message):
     """
     Получаем текст сообщения.
@@ -283,8 +322,9 @@ async def bot_started(event: BotStarted):
 
 @dp.message_created()
 async def handle_message(event: MessageCreated):
-
     message = event.message
+    save_user_profile(message)
+
 
     user_id = get_user_id(message)
     exists = (
@@ -303,9 +343,9 @@ async def handle_message(event: MessageCreated):
     print("USER ID FROM MAX:", user_id)
     print("ROLES:", get_user_roles(user_id))
 
-    
+
     # Проверяем, есть ли геолокация
-    
+
 
     body = message.body
 
@@ -332,9 +372,9 @@ async def handle_message(event: MessageCreated):
 
             return
 
-    
+
     # Если это текст — обрабатываем текст
-    
+
 
     text = get_text(message).strip()
 
@@ -438,9 +478,9 @@ async def handle_text(
         or admin
     )
 
-    
+
     # ОТМЕНА
-    
+
 
     if text == "Отмена":
 
@@ -455,9 +495,9 @@ async def handle_text(
 
         return
 
-    
+
     # ДОБАВЛЕНИЕ ТОЧКИ
-    
+
 
     if (
         state == "adding_point"
@@ -502,7 +542,7 @@ async def handle_text(
 
 
     # ПОЛУЧЕНИЕ ID ДЛЯ РЕДАКТИРОВАНИЯ
-    
+
 
     if (
         state == "editing_get_id"
@@ -559,9 +599,9 @@ async def handle_text(
 
         return
 
-    
+
     # СОХРАНЕНИЕ ИЗМЕНЕНИЙ
-    
+
 
     if (
         state == "editing_save_data"
@@ -605,9 +645,9 @@ async def handle_text(
 
         return
 
-    
+
     # ПОЛУЧЕНИЕ ID ДЛЯ УДАЛЕНИЯ
-    
+
 
     if (
         state == "deleting_get_id"
@@ -653,9 +693,9 @@ async def handle_text(
 
         return
 
-    
+
     # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ
-    
+
 
     if (
         state == "deleting_confirm"
@@ -711,7 +751,7 @@ async def handle_text(
 
 
     # МЕНЮ ОПЕРАТОРА
-    
+
 
     if text == "Добавить точку":
 
@@ -739,9 +779,9 @@ async def handle_text(
 
         return
 
-    
+
     # Редактирование
-    
+
 
     if text == "Редактировать точку":
 
@@ -766,9 +806,9 @@ async def handle_text(
 
         return
 
-    
+
     # Удаление
-    
+
 
     if text == "Удалить точку":
 
@@ -793,9 +833,9 @@ async def handle_text(
 
         return
 
-    
+
     # Список точек
-    
+
 
     if text == "Список точек":
 
@@ -834,9 +874,9 @@ async def handle_text(
 
         return
 
-    
+
     # СОЗДАНИЕ ССЫЛКИ НА ОПЕРАТОРА / АДМИНА
-    
+
 
     if text in [
         "Создать ссылку на оператора",
@@ -887,8 +927,8 @@ async def handle_text(
 
         return
 
-    
-    # СНЯТИЕ РОЛЕЙ ЧЕРЕЗ СПИСОК И ПОДТВЕРЖДЕНИЕ
+
+       # СНЯТИЕ РОЛЕЙ ЧЕРЕЗ СПИСОК И ПОДТВЕРЖДЕНИЕ
 
     if text == "Снять оператора":
         if not admin:
@@ -898,18 +938,20 @@ async def handle_text(
         targets = list(
             UserRole.select().where(UserRole.role == "operator")
         )
+
         if not targets:
             await message.answer("Операторов пока нет.")
             return
 
         state_mgr.set_state(user_id, "selecting_operator_to_remove")
+
         keyboard = make_keyboard([
-            [f"Выбрать оператора: {item.user_id}"]
+            [f"Выбрать оператора: {get_user_display(item.user_id)}"]
             for item in targets
         ] + [["Отмена"]])
 
         await message.answer(
-            "Выберите оператора, у которого нужно снять роль:",
+            "Выберите оператора. Проверьте имя и ID:",
             attachments=[keyboard]
         )
         return
@@ -922,31 +964,36 @@ async def handle_text(
         targets = list(
             UserRole.select().where(UserRole.role == "admin")
         )
+
         if not targets:
             await message.answer("Администраторов не найдено.")
             return
 
         state_mgr.set_state(user_id, "selecting_admin_to_remove")
+
         keyboard = make_keyboard([
-            [f"Выбрать администратора: {item.user_id}"]
+            [f"Выбрать администратора: {get_user_display(item.user_id)}"]
             for item in targets
         ] + [["Отмена"]])
 
         await message.answer(
-            "Выберите администратора, у которого нужно снять роль:",
+            "Выберите администратора. Проверьте имя и ID:",
             attachments=[keyboard]
         )
         return
 
     if state == "selecting_operator_to_remove" and admin:
         prefix = "Выбрать оператора: "
+
         if not text.startswith(prefix):
             await message.answer(
                 "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
             return
 
-        target_id = text[len(prefix):].strip()
+        selected = text[len(prefix):].strip()
+        target_id = selected.split("ID:")[-1].strip()
+
         exists = UserRole.select().where(
             (UserRole.user_id == target_id)
             & (UserRole.role == "operator")
@@ -960,21 +1007,29 @@ async def handle_text(
         state_mgr.set_state(
             user_id, "confirm_remove_operator", {"target_id": target_id}
         )
+
         await message.answer(
-            f"Снять роль оператора у пользователя {target_id}?",
-            attachments=[make_keyboard([["Подтвердить снятие"], ["Отмена"]])]
+            f"Вы действительно хотите снять роль оператора?\n\n"
+            f"{get_user_display(target_id)}",
+            attachments=[make_keyboard([
+                ["Подтвердить снятие"],
+                ["Отмена"]
+            ])]
         )
         return
 
     if state == "selecting_admin_to_remove" and admin:
         prefix = "Выбрать администратора: "
+
         if not text.startswith(prefix):
             await message.answer(
                 "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
             return
 
-        target_id = text[len(prefix):].strip()
+        selected = text[len(prefix):].strip()
+        target_id = selected.split("ID:")[-1].strip()
+
         exists = UserRole.select().where(
             (UserRole.user_id == target_id)
             & (UserRole.role == "admin")
@@ -982,15 +1037,22 @@ async def handle_text(
 
         if not exists:
             state_mgr.clear_state(user_id)
-            await message.answer("У этого пользователя уже нет роли администратора.")
+            await message.answer(
+                "У этого пользователя уже нет роли администратора."
+            )
             return
 
         state_mgr.set_state(
             user_id, "confirm_remove_admin", {"target_id": target_id}
         )
+
         await message.answer(
-            f"Снять роль администратора у пользователя {target_id}?",
-            attachments=[make_keyboard([["Подтвердить снятие"], ["Отмена"]])]
+            f"Вы действительно хотите снять роль администратора?\n\n"
+            f"{get_user_display(target_id)}",
+            attachments=[make_keyboard([
+                ["Подтвердить снятие"],
+                ["Отмена"]
+            ])]
         )
         return
 
@@ -1004,6 +1066,7 @@ async def handle_text(
 
         data = state_mgr.get_state(user_id)[1]
         target_id = str(data.get("target_id", ""))
+
         role_to_remove = (
             "operator" if state == "confirm_remove_operator" else "admin"
         )
@@ -1012,6 +1075,7 @@ async def handle_text(
             admin_count = UserRole.select().where(
                 UserRole.role == "admin"
             ).count()
+
             if admin_count <= 1:
                 state_mgr.clear_state(user_id)
                 await message.answer(
@@ -1026,24 +1090,21 @@ async def handle_text(
 
         state_mgr.clear_state(user_id)
 
-        if not deleted:
-            await message.answer("Роль уже отсутствует или пользователь не найден.")
-            return
-
-        logging.info(
-            "Администратор %s снял роль %s с %s",
-            user_id, role_to_remove, target_id
-        )
-        keyboard = get_menu_keyboard(user_id)
-        await message.answer(
-            f"У пользователя {target_id} снята роль "
-            f"{'оператора' if role_to_remove == 'operator' else 'администратора'}.",
-            attachments=[keyboard] if keyboard else None
-        )
+        if deleted:
+            logging.info(
+                "Администратор %s снял роль %s с пользователя %s",
+                user_id, role_to_remove, target_id
+            )
+            await message.answer(
+                f"Роль {'оператора' if role_to_remove == 'operator' else 'администратора'} "
+                f"снята.\n\n{get_user_display(target_id)}"
+            )
+        else:
+            await message.answer("Роль уже отсутствует.")
         return
 
     # СПИСОК РОЛЕЙ
-    
+
 
     if text == "Список ролей":
 
@@ -1074,7 +1135,7 @@ async def handle_text(
 
         return
 
-    
+
     # НЕРАСПОЗНАННОЕ СООБЩЕНИЕ
     # Если оператор/администратор находится в диалоге ввода, не сбрасываем состояние.
     if state and operator:

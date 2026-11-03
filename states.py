@@ -14,9 +14,9 @@ class StateManager:
         self._states = {}
 
 
-   
+
     # Установить состояние
-   
+
 
     def set_state(self, user_id, state_name, data=None):
         self._states[str(user_id)] = {
@@ -26,9 +26,10 @@ class StateManager:
         }
 
 
-    
+
     # Получить состояние
-    
+
+
 
     def get_state(self, user_id):
         user_id = str(user_id)
@@ -36,24 +37,29 @@ class StateManager:
         if user_id not in self._states:
             return None, {}
 
-        # Состояние автоматически удаляется через 10 минут
+        state_data = self._states[user_id]
+
+    # Сбрасываем состояние, если прошло больше 10 минут.
         if (
-            datetime.now()
-            - self._states[user_id]["updated_at"]
+            datetime.now() - state_data["updated_at"]
             > timedelta(minutes=10)
         ):
             self.clear_state(user_id)
             return None, {}
 
+    # Продлеваем время жизни состояния при активности.
+        state_data["updated_at"] = datetime.now()
+
         return (
-            self._states[user_id]["state"],
-            self._states[user_id]["data"]
+            state_data["state"],
+            state_data["data"],
         )
 
 
-    
+
+
     # Удалить состояние
-    
+
 
     def clear_state(self, user_id):
         self._states.pop(str(user_id), None)
