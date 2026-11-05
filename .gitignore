@@ -1,3 +1,4 @@
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +217,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Локальные данные бота
+*.db
+*.sqlite
+*.sqlite3
+bot_actions.log
+.env.*
+!.env.example
+
+# Резервные копии локальных файлов
+bot_backup.py
+bot_before_role_display.py
+bot_roles_backup.py
+wifi_bot_backup_before_profiles.db
