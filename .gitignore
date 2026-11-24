@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Локальные секреты и данные бота
+.env
+wifi_bot.db
+wifi_bot.db-journal
+bot_actions.log
