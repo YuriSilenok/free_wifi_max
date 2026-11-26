@@ -222,3 +222,14 @@ __marimo__/
 wifi_bot.db
 wifi_bot.db-journal
 bot_actions.log
+
+# Runtime secrets and working data
+.secrets/
+data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+.env.*
+!.env.example
+
